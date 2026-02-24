@@ -391,9 +391,9 @@ events_of_interest |>
 
 #### Creatinine by ancestry and B2M
 
-# COMMENT FROM GEORGE: Off topic - for later: in the Afr-high with high beta 2 AND also high creatinine, what was PFS/OS compared to SR and compared to high beta-2 and norm creatinine?  It could be the high creatinine cutoff (gneerally determined based on white patients) is not meaningful and these patients have HR clinical outcomes. (If they do - we would have to make sure they still got good dosage of drugs - rather than worse outcomes because of under-treatment - docs worried about kidney failure...)
-
 ```{r, warning = FALSE, message = FALSE}
+
+# COMMENT FROM GEORGE: Off topic - for later: in the Afr-high with high beta 2 AND also high creatinine, what was PFS/OS compared to SR and compared to high beta-2 and norm creatinine?  It could be the high creatinine cutoff (gneerally determined based on white patients) is not meaningful and these patients have HR clinical outcomes. (If they do - we would have to make sure they still got good dosage of drugs - rather than worse outcomes because of under-treatment - docs worried about kidney failure...)
 
 set.seed(1)
 

@@ -1,0 +1,1202 @@
+---
+title: "CoMMpass CGS high risk classification"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_depth: 6
+    code_folding: hide
+---
+
+# Setup
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+library(tidyverse)
+library(patchwork)
+library(ComplexHeatmap)
+
+proj_dir <- here::here()
+processed_data_dir <- here::here(proj_dir, "processed_data")
+plots_dir <- here::here(proj_dir, "plots")
+
+input_filename <- here::here(processed_data_dir, "genome_cna_1q_1p32_17p13_clinical_df.tsv")
+ancestry_filename <- here::here(processed_data_dir, "ancestry_df.tsv")
+immune_atlas_samples_filename <- here::here(processed_data_dir, "immune_atlas_samples.tsv")
+
+input_df <- read_tsv(input_filename)
+ancestry_df <- read_tsv(ancestry_filename)
+immune_atlas_samples_df <- read_tsv(immune_atlas_samples_filename)
+
+```
+
+# Creatinine
+
+According to CGS, normal creatinine levels are < 1.2 mg/dL.
+CoMMpass data reports creatinine as micro-mol/L.
+The molar mass of creatinine is 113.12 g/mol, or 113.12e-6 g/micro-mol.
+Therefore normal creatinine is < 1.2 mg/dL x (1g/1000mg) x (10 dL/L) x (1micro-mol/113.12e-6g) = 106.082 micro-mol/L
+See violin plots:
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+set.seed(1)
+creatinine_mgdl_plot <- input_df |>
+  ggplot(aes(x = "",
+             y = Creatinine)) +
+  geom_violin() +
+  geom_jitter(height = 0) +
+  geom_hline(yintercept = 1.2,
+             lty = 2,
+             color = "red") +
+  labs(x = NULL,
+       y = "mg/dL",
+       title = "Creatinine levels assuming mg/dL") +
+  theme_bw()
+
+set.seed(1)
+creatinine_micromolL_plot <- input_df |>
+  ggplot(aes(x = "",
+             y = Creatinine)) +
+  geom_violin() +
+  geom_jitter(height = 0) +
+  geom_hline(yintercept = 106.082,
+             lty = 2,
+             color = "red") +
+  labs(x = NULL,
+       y = "micromol/L",
+       title = "Creatinine levels assuming micromol/L") +
+  theme_bw()
+
+creatinine_mgdl_plot + creatinine_micromolL_plot
+
+```
+
+# Evaluate risk criteria
+
+- Criteria 1: del(17p), with a cutoff of >20% clonal fraction, and/or TP53 mutation
+- Criteria 2: an IgH translocation including t(4;14), t(14;16), or t(14;20) along with 1q+ and/or del(1p32)
+- Criteria 3: monoallelic del(1p32) along with 1q+ or biallelic del(1p32)
+- Criteria 4: β2 microglobulin ≥5.5 mg/L with normal creatinine (<1.2 mg/dL)
+
+Patients meeting one or more criteria are High Risk (HR).
+Patients meeting no criteria and having no missing data are Standard Risk (SR).
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+risk_df <- input_df |>
+  mutate(in_immune_atlas = public_id %in% immune_atlas_samples_df$public_id) |>
+  mutate(has_del17p13 = ifelse(mean_log2_17p13 <= -0.152, TRUE, FALSE),
+         has_TP53_mutation = case_when(TP53_Mutation_Count > 0 ~ TRUE,
+                                       is.na(TP53_Mutation_Count) ~ NA,
+                                       .default = FALSE),
+         has_t414 = ifelse(NSD2_t_4_14_pos == 1, TRUE, FALSE),
+         has_t1416 = ifelse(MAF_t_14_16_pos == 1, TRUE, FALSE),
+         has_t1420 = ifelse(MAFB_t_14_20_pos == 1, TRUE, FALSE),
+         has_1q = ifelse(mean_log2_1q >= 0.1375, TRUE, FALSE),
+         has_mono_del1p32 = ifelse(mean_log2_1p32 <= -0.152, TRUE, FALSE),
+         has_bi_del1p32 = ifelse(mean_log2_1p32 <= -1.3219, TRUE, FALSE),
+         has_del1p32 = has_mono_del1p32 | has_bi_del1p32,
+         has_high_B2M = ifelse(Serum_B2M >= 5.5, TRUE, FALSE),
+         has_normal_creatinine = ifelse(Creatinine < 106.082, TRUE, FALSE),
+         criteria1 = has_del17p13 | has_TP53_mutation,
+         criteria2 = (has_t414 | has_t1416 | has_t1420) & (has_1q | has_del1p32),
+         criteria3 = (has_mono_del1p32 & has_1q) | has_bi_del1p32,
+         criteria4 = has_high_B2M & has_normal_creatinine) |>
+  rowwise() |>
+  mutate(CGS_risk = case_when(any(criteria1, criteria2, criteria3, criteria4, na.rm = TRUE) ~ "High",
+                              all(!criteria1, !criteria2, !criteria3, !criteria4, na.rm = FALSE) ~ "Standard",
+                              .default = NA),
+         CGS_risk_genomic = case_when(any(criteria1, criteria2, criteria3, na.rm = TRUE) ~ "High",
+                                      all(!criteria1, !criteria2, !criteria3, na.rm = FALSE) ~ "Standard",
+                                      .default = NA),
+         CGS_risk_C4 = case_when(criteria4 & all(!criteria1, !criteria2, !criteria3, na.rm = FALSE) ~ "High",
+                                 all(!criteria1, !criteria2, !criteria3, !criteria4, na.rm = FALSE) ~ "Standard",
+                                 .default = NA)) |>
+  ungroup() |>
+  left_join(ancestry_df |> select(public_id, afr_high),
+            by = c("public_id"))
+
+readr::write_tsv(x = risk_df,
+                 file = here::here(processed_data_dir, "CGS_risk_full_criteria_df.tsv"))
+
+readr::write_tsv(x = risk_df |> select(public_id, CGS_risk, CGS_risk_genomic),
+                 file = here::here(processed_data_dir, "CGS_risk_df.tsv"))
+
+readr::write_tsv(x = risk_df |> select(public_id, 
+                                       in_immune_atlas, 
+                                       afr_high, 
+                                       CGS_risk, 
+                                       starts_with("criteria"),
+                                       starts_with("has")),
+                 file = here::here(processed_data_dir, "CGS_risk_key_criteria.tsv"))
+
+```
+
+# Ancestry concordance
+
+```{r, warning = FALSE, message = FALSE}
+
+genetic_ancestry_concordant_with_self_reported_ethnicity_prop <- risk_df |> 
+  filter(reclassify_ethnicity %in% c("Black", "White", "Asian")) |> 
+  #count(afr_high, reclassify_ethnicity) |>
+  mutate(concordant = case_when(afr_high == "AFR High" & reclassify_ethnicity %in% c("Black") ~ TRUE,
+                                afr_high == "AFR Low" & reclassify_ethnicity %in% c("White", "Asian") ~ TRUE,
+                                .default = FALSE)) |>
+  pull(concordant) |>
+  mean()
+
+additional_samples_with_genetic_ancestry <- risk_df |> 
+  count(afr_high, reclassify_ethnicity) |> 
+  filter(is.na(reclassify_ethnicity) | 
+           reclassify_ethnicity %in% c("Other_Unknown")) |> 
+  filter(!is.na(afr_high)) |> 
+  pull(n) |> 
+  sum()
+
+str_c("Genetic ancestry concordance with self-reported ethnicity: ",
+      round(100*genetic_ancestry_concordant_with_self_reported_ethnicity_prop, 2), "%. ",
+      "Additional samples with genetic ancestry: ",
+      additional_samples_with_genetic_ancestry)
+
+```
+
+# Explore a bit
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+gender_plot <- risk_df |>
+  count(CGS_risk, Gender) |>
+  ggplot(aes(x = Gender,
+             y = n,
+             fill = CGS_risk)) +
+  geom_col(position = "fill") +
+  labs(title = "Gender",
+       x = "Gender",
+       y = "Proportion",
+       fill = "CGS risk") +
+  theme_bw()
+
+ethnicity_plot <- risk_df |>
+  count(CGS_risk, reclassify_ethnicity) |>
+  ggplot(aes(x = reclassify_ethnicity,
+             y = n,
+             fill = CGS_risk)) +
+  geom_col(position = "fill") +
+  labs(title = "Ethnicity",
+       x = "Ethnicity",
+       y = "Proportion",
+       fill = "CGS risk") +
+  theme_bw()
+
+iss_stage_plot <- risk_df |>
+  count(CGS_risk, ISS_Stage) |>
+  ggplot(aes(x = factor(ISS_Stage),
+             y = n,
+             fill = CGS_risk)) +
+  geom_col(position = "fill") +
+  labs(title = "ISS stage",
+       x = "ISS stage",
+       y = "Proportion",
+       fill = "CGS risk") +
+  theme_bw()
+
+imwg_risk_plot <- risk_df |>
+  count(CGS_risk, IMWG_Risk_Class) |>
+  ggplot(aes(x = factor(IMWG_Risk_Class),
+             y = n,
+             fill = CGS_risk)) +
+  geom_col(position = "fill") +
+  labs(title = "IMWG risk (former definition)",
+       x = "IMWG risk\n(former definition)",
+       y = "Proportion",
+       fill = "CGS risk") +
+  theme_bw()
+
+age_plot <- risk_df |>
+  ggplot(aes(x = CGS_risk,
+             y = Age,
+             color = CGS_risk)) +
+  geom_violin(draw_quantiles = 0.5,
+              show.legend = FALSE) +
+  geom_jitter(height = 0,
+              width = 0.1,
+              show.legend = FALSE) +
+  labs(title = "Age",
+       x = "CGS risk") +
+  theme_bw()
+
+cytogenetic_risk_plot <- risk_df |>
+  count(CGS_risk, Cytogenetic_High_Risk) |>
+  ggplot(aes(x = factor(Cytogenetic_High_Risk),
+             y = n,
+             fill = CGS_risk)) +
+  geom_col(position = "fill") +
+  labs(title = "Cytogenetic risk",
+       x = "Cytogenetic risk",
+       fill = "CGS risk",
+       y = "Proportion") +
+  theme_bw()
+
+gender_plot + ethnicity_plot + iss_stage_plot + 
+  imwg_risk_plot + cytogenetic_risk_plot + age_plot +
+  plot_layout(guides = "collect") +
+  plot_annotation(title = "CGS risk (including all criteria)")
+
+```
+
+# AFR plot
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+prop_text_genomic_df <- risk_df |>
+  filter(!is.na(CGS_risk_genomic), !is.na(afr_high)) |>
+  rbind(risk_df |>
+          filter(!is.na(CGS_risk_genomic), !is.na(afr_high)) |>
+          mutate(afr_high = "Overall")) |>
+  count(CGS_risk_genomic, afr_high) |>
+  group_by(afr_high) |>
+  mutate(prop = n/sum(n))
+
+flip_afr_risk_genomic_plot <- risk_df |>
+  filter(!is.na(CGS_risk_genomic), !is.na(afr_high)) |>
+  rbind(risk_df |>
+          filter(!is.na(CGS_risk_genomic), !is.na(afr_high)) |>
+          mutate(afr_high = "Overall")) |>
+  count(CGS_risk_genomic, afr_high) |>
+  ggplot(aes(fill = CGS_risk_genomic,
+             y = n,
+             x = afr_high)) +
+  geom_col(position = "fill") +
+  geom_text(data = prop_text_genomic_df |> filter(CGS_risk_genomic == "High"),
+            aes(x = afr_high,
+                y = 1 - prop + .03,
+                label = str_c(round(100*prop, 1), "%, n = ", n)),
+            vjust = 0) +
+  geom_text(data = prop_text_genomic_df |> filter(CGS_risk_genomic == "Standard"),
+            aes(x = afr_high,
+                y = prop - .03,
+                label = str_c(round(100*prop, 1), "%, n = ", n)),
+            vjust = 1) +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  labs(title = "CGS HR vs. SR within AFR groups",
+       subtitle = "Genomic only",
+       fill = "CGS risk",
+       x = "1KG-AFR-like",
+       y = "Proportion") +
+  theme_bw()
+
+prop_text_df <- risk_df |>
+  filter(!is.na(CGS_risk), !is.na(afr_high)) |>
+  rbind(risk_df |>
+          filter(!is.na(CGS_risk), !is.na(afr_high)) |>
+          mutate(afr_high = "Overall")) |>
+  count(CGS_risk, afr_high) |>
+  group_by(afr_high) |>
+  mutate(prop = n/sum(n))
+
+flip_afr_risk_plot <- risk_df |>
+  filter(!is.na(CGS_risk), !is.na(afr_high)) |>
+  rbind(risk_df |>
+          filter(!is.na(CGS_risk), !is.na(afr_high)) |>
+          mutate(afr_high = "Overall")) |>
+  count(CGS_risk, afr_high) |>
+  ggplot(aes(fill = CGS_risk,
+             y = n,
+             x = afr_high)) +
+  geom_col(position = "fill") +
+  geom_text(data = prop_text_df |> filter(CGS_risk == "High"),
+            aes(x = afr_high,
+                y = 1 - prop + .03,
+                label = str_c(round(100*prop, 1), "%, n = ", n)),
+            vjust = 0) +
+  geom_text(data = prop_text_df |> filter(CGS_risk == "Standard"),
+            aes(x = afr_high,
+                y = prop - .03,
+                label = str_c(round(100*prop, 1), "%, n = ", n)),
+            vjust = 1) +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  labs(title = "CGS HR vs. SR within AFR groups",
+       subtitle = "All criteria",
+       fill = "CGS risk",
+       x = "1KG-AFR-like",
+       y = "Proportion") +
+  theme_bw()
+
+ggsave(filename = here::here(plots_dir, "flip_afr_risk.pdf"),
+       plot = flip_afr_risk_plot + flip_afr_risk_genomic_plot + plot_layout(guides = "collect"),
+       width = 12, height = 6)
+
+flip_afr_risk_plot + flip_afr_risk_genomic_plot + plot_layout(guides = "collect")
+
+```
+
+# Criteria by ancestry
+
+```{r, warning = FALSE, message = FALSE}
+
+events_of_interest <- c("criteria1", "has_del17p13", "has_TP53_mutation",
+                        "criteria2", "has_t414", "has_t1416", "has_t1420", "has_1q", "has_del1p32",
+                        "criteria3", "has_mono_del1p32", #"has_bi_del1p32",
+                        "criteria4", "has_high_B2M", "has_normal_creatinine")
+
+events_of_interest |>
+  purrr::map(
+    \(event_of_interest) {
+      
+      event_table <- risk_df |>
+        filter(!is.na(afr_high),
+               !is.na(!!sym(event_of_interest))) |>
+        count(afr_high,
+              !!sym(event_of_interest)) |>
+        group_by(afr_high) |>
+        mutate(total = sum(n),
+               prop = n/sum(n),
+               hr_factor = ifelse(!!sym(event_of_interest), "HR factor (TRUE)", "SR factor (FALSE)"))
+      
+      p_value <- fisher.test(matrix(event_table$n, nrow = 2))$p.value
+      
+      event_table |> 
+        ggplot(aes(fill = hr_factor,
+                   y = n,
+                   x = afr_high)) +
+        geom_col(position = "fill") +
+        geom_text(data = event_table |> filter(!!sym(event_of_interest) == FALSE),
+                  aes(x = afr_high,
+                      y = prop - .03,
+                      label = str_c(round(100*prop, 1), "%, n = ", n)),
+                  vjust = 1) +
+        geom_text(data = event_table |> filter(!!sym(event_of_interest) == TRUE),
+                  aes(x = afr_high,
+                      y = 1 - prop + .03,
+                      label = str_c(round(100*prop, 1), "%, n = ", n)),
+                  vjust = 0) +
+        scale_y_continuous(breaks = seq(0,1,0.1)) +
+        #scale_fill_manual(values = c("#F8766D", "#00BFC4")) +
+        labs(title = event_of_interest,
+             subtitle = str_c("p-value = ", round(p_value, 3)),
+             fill = event_of_interest,
+             x = "1KG-AFR-like",
+             y = "Proportion") +
+        theme_bw()
+      
+      
+    } ) |> 
+  setNames(events_of_interest)
+
+
+
+```
+
+#### Creatinine by ancestry and B2M
+
+# COMMENT FROM GEORGE: Off topic - for later: in the Afr-high with high beta 2 AND also high creatinine, what was PFS/OS compared to SR and compared to high beta-2 and norm creatinine?  It could be the high creatinine cutoff (gneerally determined based on white patients) is not meaningful and these patients have HR clinical outcomes. (If they do - we would have to make sure they still got good dosage of drugs - rather than worse outcomes because of under-treatment - docs worried about kidney failure...)
+
+```{r, warning = FALSE, message = FALSE}
+
+set.seed(1)
+
+risk_df |> 
+  filter(!is.na(afr_high), !is.na(has_high_B2M), !is.na(has_normal_creatinine), !is.na(Creatinine)) |>
+  mutate(has_high_B2M = ifelse(has_high_B2M, "High B2M", "Normal B2M")) |> 
+  ggplot(aes(x = afr_high, 
+             y = log(Creatinine))) + 
+  geom_violin(draw_quantiles = 0.5) + 
+  geom_point(aes(color = criteria4), 
+             #position = position_jitterdodge(dodge.width = 0.9),
+             position = position_jitter(height = 0, width = 0.1), 
+             shape = 16, 
+             alpha = 0.75, 
+             show.legend = TRUE) + 
+  geom_hline(yintercept = log(106.082), 
+             lty = 2, 
+             color = "red") + 
+  facet_wrap(~ has_high_B2M) + 
+  labs(title = "Creatinine levels",
+       subtitle = "by genetic ancestry and B2M levels",
+       x = "Genetic ancestry", 
+       y = "log(Creatinine) (micro-mol/L)") + 
+  scale_color_brewer(type = "qual") + 
+  theme_bw(base_size = 20)
+
+
+```
+
+# Creatinine for publication
+
+```{r}
+
+ancestry_colors <- c("AFR High" = "#86325F", "AFR Low" = "#5A90C7")
+
+creatinine_plot <- risk_df |>
+  mutate(cohort = "Full CoMMpass cohort") |>
+  bind_rows(risk_df |>
+              filter(public_id %in% immune_atlas_samples_df$public_id) |>
+              mutate(cohort = "Immune Atlas subset")) |>
+  filter(!is.na(afr_high), !is.na(has_high_B2M), !is.na(has_normal_creatinine), !is.na(Creatinine)) |>
+  mutate(has_high_B2M = ifelse(has_high_B2M, "High B2M", "Normal B2M")) |>
+  ggplot(aes(fill = afr_high,
+             x = has_high_B2M,
+             y = Creatinine)) +
+  geom_violin(draw_quantiles = 0.5,
+              scale = "width",
+              alpha = 0.5) +
+  geom_hline(yintercept = 106.082,
+             lty = 2,
+             color = "red") +
+  geom_point(position = position_jitterdodge(dodge.width = 0.9, jitter.width = 0.1, jitter.height = 0, seed = 1),
+             shape = 16,
+             show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 2100)) +
+  ggbreak::scale_y_break(c(1000, 1000), scales = 0.25, ticklabels = c(1250, 1500, 1750, 2000)) +
+  annotate(geom = "text", x = 0, y = 106.082*1.2, label = "   High", hjust = 0, vjust = 0) +
+  annotate(geom = "text", x = 0, y = 106.082*.8, label = "   Normal", hjust = 0, vjust = 1) +
+  facet_wrap(~ cohort) +
+  labs(title = "Criteria 4: High B2M with normal creatinine",
+       x = "Genetic ancestry",
+       y = "Creatinine (micro-mol/L)",
+       fill = "Ancestry") +
+  scale_fill_manual(values = ancestry_colors) +
+  theme_bw(base_size = 12)
+
+ggsave(plot = creatinine_plot,
+       filename = here::here(plots_dir, "creatinine.pdf"), 
+       width = 10, height = 6)
+
+creatinine_plot
+
+```
+
+# Test for difference in ancestry
+
+#### All criteria
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+afr_high_CGS_table <- risk_df |>
+  select(afr_high, CGS_risk) |>
+  table()
+
+list(afr_high_CGS_table, 
+     fisher.test(afr_high_CGS_table), 
+     chisq.test(afr_high_CGS_table))
+
+```
+
+#### Genomics only
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+afr_high_CGS_genomic_table <- risk_df |>
+  select(afr_high, CGS_risk_genomic) |>
+  table()
+
+list(afr_high_CGS_genomic_table,
+     fisher.test(afr_high_CGS_genomic_table),
+     chisq.test(afr_high_CGS_genomic_table))
+
+```
+
+# Criteria overlap 
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+# UpSet plot
+m <- make_comb_mat(risk_df |>
+                     filter(!is.na(CGS_risk)) |>
+                     select(criteria1,
+                            criteria2,
+                            criteria3,
+                            criteria4))
+
+UpSet(m = m,
+      top_annotation = upset_top_annotation(m, add_numbers = TRUE, ),
+      right_annotation = upset_right_annotation(m, add_numbers = TRUE))
+
+```
+
+# Heatmap
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+heatmap_df <- risk_df |>
+  select(public_id, starts_with("criteria")) |>
+  column_to_rownames(var = "public_id") |>
+  mutate(across(.cols = everything(), .fns = as.numeric)) |>
+  t()
+
+col_annotation_df <- risk_df |>
+  select(public_id, 
+         has_del17p13,
+         has_TP53_mutation,
+         has_t414,
+         has_t1416,
+         has_t1420,
+         has_1q,
+         has_del1p32,
+         has_mono_del1p32,
+         has_bi_del1p32,
+         has_high_B2M,
+         has_normal_creatinine,
+         afr_high, 
+         CGS_risk) |>
+  column_to_rownames(var = "public_id") |>
+  mutate(across(.cols = everything(), .fns = factor))
+
+heatmap_plot <- pheatmap::pheatmap(
+  heatmap_df,
+  main = "CoMMpass (n = 877): CGS High Risk Multiple Myeloma Definition",
+  labels_row = c("Criteria 1:\ndel(17p) or TP53 mutation",
+                 "Criteria 2:\nt(4;14), t(14;16), or t(14;20)\nalong with 1q+ and/or del(1p32)",
+                 "Criteria 3:\nmonoallelic del(1p32)\nalong with 1q+ or biallelic del(1p32)",
+                 "Criteria 4:\nB2M ≥5.5 mg/L\nwith normal creatinine (<1.2 mg/dL)"),
+  annotation_col = col_annotation_df,
+  fontsize = 16,
+  legend = FALSE,
+  annotation_legend = FALSE,
+  legend_breaks = c(0,1),
+  show_colnames = FALSE,
+  color = c("#bcbddc", "#756bb1"),
+  annotation_colors = list("CGS_risk" = c("High" = "#de2d26", "Standard" = "#fee0d2"),
+                           "afr_high" = c("AFR High" = "black", "AFR Low" = "grey90"),
+                           "has_normal_creatinine" = c("TRUE" = "#31a354", "FALSE" = "#a1d99b"),
+                           "has_high_B2M" = c("TRUE" = "#31a354", "FALSE" = "#a1d99b"),
+                           "has_bi_del1p32" = c("TRUE" = "#2c7fb8", "FALSE" = "#edf8b1"),
+                           "has_mono_del1p32" = c("TRUE" = "#2c7fb8", "FALSE" = "#edf8b1"),
+                           "has_del1p32" = c("TRUE" = "#e6550d", "FALSE" = "#fee6ce"),
+                           "has_1q" = c("TRUE" = "#e6550d", "FALSE" = "#fee6ce"),
+                           "has_t1416" = c("TRUE" = "#e6550d", "FALSE" = "#fee6ce"),
+                           "has_t1420" = c("TRUE" = "#e6550d", "FALSE" = "#fee6ce"),
+                           "has_t414" = c("TRUE" = "#e6550d", "FALSE" = "#fee6ce"),
+                           "has_TP53_mutation" = c("TRUE" = "#3182bd", "FALSE" = "#deebf7"),
+                           "has_del17p13" = c("TRUE" = "#3182bd", "FALSE" = "#deebf7")))
+
+ggsave(filename = here::here(plots_dir, "cgs_heatmap.pdf"), 
+       plot = heatmap_plot, 
+       height = 8, 
+       width = 12)
+
+heatmap_plot
+
+```
+
+# Survival
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+# survival (PFS)
+
+Surv_obj <- with(risk_df,
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk,
+                                   data = risk_df)
+
+abstract_PFS_object <- survfit_obj
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+# survival (OS)
+
+Surv_obj <- with(risk_df,
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk,
+                                   data = risk_df)
+
+abstract_OS_object <- survfit_obj
+
+os_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Overall Survival (OS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "CGS high risk vs. standard risk") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top")
+
+ggsave(filename = here::here(plots_dir, str_c("CGS_HR_SR_PFS_OS.pdf")),
+       plot = combined_survival_plot_object,
+       width = 12,
+       height = 8)
+
+combined_survival_plot_object
+
+```
+
+# Survival triplet ASCT
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+# survival (PFS)
+
+Surv_obj <- with(risk_df |> filter(received_asct, received_triplet),
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk,
+                                   data = risk_df |> filter(received_asct, received_triplet))
+
+summary(survfit_obj)$table[,"median"]/30.4375
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df |> filter(received_asct, received_triplet),
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+# survival (OS)
+
+Surv_obj <- with(risk_df |> filter(received_asct, received_triplet),
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk,
+                                   data = risk_df |> filter(received_asct, received_triplet))
+
+summary(survfit_obj)$table[,"median"]/30.4375
+
+os_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df |> filter(received_asct, received_triplet),
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Overall Survival (OS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "CGS high risk vs. standard risk") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top")
+
+ggsave(filename = here::here(plots_dir, str_c("CGS_HR_SR_PFS_OS.ASCT_triplet_only.pdf")),
+       plot = combined_survival_plot_object,
+       width = 12,
+       height = 8)
+
+combined_survival_plot_object
+
+```
+
+# Survival by AFR
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+# survival (PFS) by AFR
+
+Surv_obj <- with(risk_df,
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk + afr_high,
+                                   data = risk_df)
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+# survival (OS) by AFR
+
+Surv_obj <- with(risk_df,
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk + afr_high,
+                                   data = risk_df)
+
+os_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Overall Survival (OS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "CGS high risk vs. standard risk", subtitle = "by AFR High status") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top", legend.direction = "vertical")
+
+ggsave(filename = here::here(plots_dir, str_c("CGS_HR_SR_PFS_OS.by_AFR.pdf")),
+       plot = combined_survival_plot_object,
+       width = 16,
+       height = 12)
+
+combined_survival_plot_object
+
+```
+
+# Survival by AFR (SR only)
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+# survival (PFS) by AFR (standard risk only)
+
+Surv_obj <- with(risk_df |> filter(CGS_risk == "Standard"),
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk + afr_high,
+                                   data = risk_df |> filter(CGS_risk == "Standard"))
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df |> filter(CGS_risk == "Standard"),
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+# survival (OS) by AFR (standard risk only)
+
+Surv_obj <- with(risk_df |> filter(CGS_risk == "Standard"),
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk + afr_high,
+                                   data = risk_df |> filter(CGS_risk == "Standard"))
+
+os_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df |> filter(CGS_risk == "Standard"),
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Overall Survival (OS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "CGS Standard risk", subtitle = "by AFR High status") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top", legend.direction = "vertical")
+
+ggsave(filename = here::here(plots_dir, str_c("CGS_SR_only_PFS_OS.by_AFR.pdf")),
+       plot = combined_survival_plot_object,
+       width = 16,
+       height = 12)
+
+combined_survival_plot_object
+
+```
+
+# Survival by AFR (HR only)
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+# survival (PFS) by AFR (high risk only)
+
+Surv_obj <- with(risk_df |> filter(CGS_risk == "High"),
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk + afr_high,
+                                   data = risk_df |> filter(CGS_risk == "High"))
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df |> filter(CGS_risk == "High"),
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+# survival (OS) by AFR (high risk only)
+
+Surv_obj <- with(risk_df |> filter(CGS_risk == "High"),
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+survfit_obj <- survminer::surv_fit(Surv_obj ~ CGS_risk + afr_high,
+                                   data = risk_df |> filter(CGS_risk == "High"))
+
+os_plot <- survminer::ggsurvplot(
+  fit = survfit_obj,
+  data = risk_df |> filter(CGS_risk == "High"),
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  title = "Overall Survival (OS)",
+  xlab = "Time (days)",
+  ylab = "Probability",
+  legend.title = "")
+
+combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "CGS High risk", subtitle = "by AFR High status") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top", legend.direction = "vertical")
+
+ggsave(filename = here::here(plots_dir, str_c("CGS_HR_only_PFS_OS.by_AFR.pdf")),
+       plot = combined_survival_plot_object,
+       width = 16,
+       height = 12)
+
+combined_survival_plot_object
+
+```
+
+# Cox PH model
+
+Does AFR ancestry impact survival controlling for Age, Transplant, and Triplet therapy?
+
+#### SR and HR PFS
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+Surv_obj <- with(risk_df,
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+coxph_result <- survival::coxph(Surv_obj ~ Age + Gender + afr_high + CGS_risk + received_asct + received_triplet,
+                                data = risk_df)
+
+print(summary(coxph_result))
+
+```
+
+#### SR and HR OS
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+Surv_obj <- with(risk_df,
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+coxph_result <- survival::coxph(Surv_obj ~ Age + Gender + afr_high + CGS_risk + received_asct + received_triplet,
+                                data = risk_df)
+
+print(summary(coxph_result))
+
+```
+
+
+#### HR PFS
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+Surv_obj <- with(risk_df |> filter(CGS_risk == "High"),
+                 survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+coxph_result <- survival::coxph(Surv_obj ~ Age + Gender + afr_high + received_asct + received_triplet,
+                                data = risk_df |> filter(CGS_risk == "High"))
+
+print(summary(coxph_result))
+
+```
+
+#### SR PFS
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+Surv_obj <- with(risk_df |> filter(CGS_risk == "Standard"),
+                 survival::Surv(final_survival_time_os, final_censor_os))
+
+coxph_result <- survival::coxph(Surv_obj ~ Age + Gender + afr_high + received_asct + received_triplet,
+                                data = risk_df |> filter(CGS_risk == "Standard"))
+
+print(summary(coxph_result))
+
+```
+
+# Survival by criteria
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+criteria_list <- list("criteria1" = "Criteria 1: del(17p) or TP53 mutation",
+                      "criteria2" = "Criteria 2: t(4;14), t(14;16), or t(14;20) along with 1q+ and/or del(1p32)",
+                      "criteria3" = "Criteria 3: monoallelic del(1p32) along with 1q+ or biallelic del(1p32)",
+                      "criteria4" = "Criteria 4: B2M ≥5.5 mg/L with normal creatinine (<1.2 mg/dL)")
+
+criteria_survival_plot_list <- names(criteria_list) |>
+  purrr::map(\(x) {
+    
+    renamed_criteria <- str_replace(x, "criteria", "Criteria ")
+    
+    criteria_df <- risk_df |>
+      filter(get(x) | CGS_risk == "Standard") |>
+      select(final_survival_time_pfs, final_censor_pfs, final_survival_time_os, final_censor_os, CGS_risk) |>
+      mutate(final_survival_time_pfs = final_survival_time_pfs,
+             final_survival_time_os = final_survival_time_os,
+             CGS_risk = ifelse(CGS_risk == "High",
+                               renamed_criteria,
+                               "Standard"))
+    
+    pfs_Surv_obj <- with(criteria_df,
+                         survival::Surv(final_survival_time_pfs, final_censor_pfs))
+    
+    pfs_survfit_obj <- survminer::surv_fit(pfs_Surv_obj ~ CGS_risk,
+                                           data = criteria_df)
+    
+    pfs_plot <- survminer::ggsurvplot(
+      fit = pfs_survfit_obj,
+      data = criteria_df,
+      conf.int = TRUE,
+      pval = TRUE,
+      surv.median.line = "hv",
+      ggtheme = theme_bw(base_size = 16),
+      risk.table = TRUE,
+      title = "Progression-free Survival (PFS)",
+      xlab = "Time (days)",
+      ylab = "Probability (PFS)",
+      legend.title = "")
+    
+    os_Surv_obj <- with(criteria_df,
+                        survival::Surv(final_survival_time_os, final_censor_os))
+    
+    os_survfit_obj <- survminer::surv_fit(os_Surv_obj ~ CGS_risk,
+                                          data = criteria_df)
+    
+    os_plot <- survminer::ggsurvplot(
+      fit = os_survfit_obj,
+      data = criteria_df,
+      conf.int = TRUE,
+      pval = TRUE,
+      surv.median.line = "hv",
+      ggtheme = theme_bw(base_size = 16),
+      risk.table = TRUE,
+      title = "Overall Survival (OS)",
+      xlab = "Time (days)",
+      ylab = "Probability (OS)",
+      legend.title = "")
+    
+    combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+      plot_layout(guides = "collect", heights = c(4,2)) +
+      plot_annotation(title = str_c(renamed_criteria, " HR vs. SR"),
+                      subtitle = criteria_list[[x]]) &
+      theme_bw(base_size = 16) +
+      theme(legend.position = "top")
+    
+    ggsave(filename = here::here(plots_dir, str_c(x, "_HR_SR_PFS_OS.pdf")),
+           plot = combined_survival_plot_object,
+           width = 12,
+           height = 8)
+    
+    print(combined_survival_plot_object)
+    
+  }
+  
+  
+  ) |>
+  setNames(names(criteria_list))
+
+
+```
+
+Unfortunately, sample size is too low to look at AFR High vs. Low within each criteria.
+
+# Number of criteria
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+criteria_df <- risk_df |>
+  filter(!is.na(CGS_risk)) |>
+  select(public_id,
+         starts_with("criteria"),
+         CGS_risk) |>
+  pivot_longer(cols = starts_with("criteria")) |>
+  group_by(public_id,
+           CGS_risk) |>
+  summarize(total = sum(value, na.rm = TRUE),
+            total_na = sum(is.na(value))) |>
+  ungroup() |>
+  left_join(risk_df |> select(public_id, final_survival_time_pfs, final_censor_pfs, final_survival_time_os, final_censor_os),
+            by = "public_id") |>
+  filter(total %in% c(0,1,2))
+
+pfs_Surv_obj <- with(criteria_df,
+                     survival::Surv(final_survival_time_pfs/30.5, final_censor_pfs))
+
+pfs_survfit_obj <- survminer::surv_fit(pfs_Surv_obj ~ total,
+                                       data = criteria_df)
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = pfs_survfit_obj,
+  data = criteria_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(base_size = 20),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability (PFS)",
+  legend.title = "")
+
+os_Surv_obj <- with(criteria_df,
+                    survival::Surv(final_survival_time_pfs/30.5, final_censor_os))
+
+os_survfit_obj <- survminer::surv_fit(os_Surv_obj ~ total,
+                                      data = criteria_df)
+
+os_plot <- survminer::ggsurvplot(
+  fit = os_survfit_obj,
+  data = criteria_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(base_size = 20),
+  risk.table = TRUE,
+  title = "Overall Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability (PFS)",
+  legend.title = "")
+
+(pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "Is survival worse when more HR criteria are met?") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top")
+
+```
+
+# C4 only vs. SR
+
+```{r, warning = FALSE, message = FALSE, fig.height=8, fig.width=12}
+
+criteria_df <- risk_df
+
+pfs_Surv_obj <- with(criteria_df,
+                     survival::Surv(final_survival_time_pfs, final_censor_pfs))
+
+pfs_survfit_obj <- survminer::surv_fit(pfs_Surv_obj ~ CGS_risk_C4,
+                                       data = criteria_df)
+
+pfs_plot <- survminer::ggsurvplot(
+  fit = pfs_survfit_obj,
+  data = criteria_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(base_size = 16),
+  risk.table = TRUE,
+  title = "Progression-free Survival (PFS)",
+  xlab = "Time (days)",
+  ylab = "Probability (PFS)",
+  legend.title = "")
+
+os_Surv_obj <- with(criteria_df,
+                    survival::Surv(final_survival_time_os, final_censor_os))
+
+os_survfit_obj <- survminer::surv_fit(os_Surv_obj ~ CGS_risk_C4,
+                                      data = criteria_df)
+
+os_plot <- survminer::ggsurvplot(
+  fit = os_survfit_obj,
+  data = criteria_df,
+  conf.int = TRUE,
+  pval = TRUE,
+  surv.median.line = "hv",
+  ggtheme = theme_bw(base_size = 16),
+  risk.table = TRUE,
+  title = "Overall Survival (OS)",
+  xlab = "Time (days)",
+  ylab = "Probability (OS)",
+  legend.title = "")
+
+combined_survival_plot_object <- (pfs_plot$plot + os_plot$plot) / free(pfs_plot$table + os_plot$table) +
+  plot_layout(guides = "collect", heights = c(4,2)) +
+  plot_annotation(title = "High risk due to Criteria 4 only vs. Standard risk") &
+  theme_bw(base_size = 16) +
+  theme(legend.position = "top")
+
+ggsave(filename = here::here(plots_dir, str_c("criteria4_only_HR_SR_PFS_OS.pdf")),
+       plot = combined_survival_plot_object,
+       width = 12,
+       height = 8)
+
+combined_survival_plot_object
+
+```
+
+# Abstract numbers
+
+```{r, warning = FALSE, message = FALSE}
+
+n_hr <- risk_df |> filter(CGS_risk == "High") |> nrow()
+n_sr <- risk_df |> filter(CGS_risk == "Standard") |> nrow()
+
+n <- risk_df |> nrow()
+n_na <- risk_df |> filter(is.na(CGS_risk)) |> nrow()
+
+str_c("We evaluated the CGS risk status of ", n, " patients from CoMMpass, finding ",
+      round(100*n_sr/(n_hr + n_sr), 1), "% (n = ", n_sr, ") to be standard risk and ",
+      round(100*n_hr/(n_hr + n_sr), 1), "% (n = ", n_hr, ") to be high risk, after removing ",
+      round(100*n_na/n, 1), "% (n = ", n_na, ") due to missing data.")
+
+```
+
+#### Median survival time (months)
+
+```{r, warning = FALSE, message = FALSE}
+
+summary(abstract_PFS_object)$table[,"median"]/30.4375
+
+```
+
+```{r, warning = FALSE, message = FALSE}
+
+summary(abstract_OS_object)$table[,"median"]/30.4375
+
+```
+
+
+#### Criteria numbers
+
+```{r, warning = FALSE, message = FALSE}
+
+
+```
